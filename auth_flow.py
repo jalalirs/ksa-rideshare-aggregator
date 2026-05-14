@@ -205,41 +205,80 @@ async def _start_uber(pl: PendingLogin, phone: str) -> dict:
 
     sel = "#PHONE_NUMBER_or_EMAIL_ADDRESS"
     await pl.page.click(sel)
-    await pl.page.fill(sel, "")  # clear first
+    await pl.page.fill(sel, "")
     await pl.page.type(sel, international, delay=80)
+    # Blur the input so React's onChange/onBlur finishes its validation cycle
+    await pl.page.evaluate("document.activeElement && document.activeElement.blur()")
     await pl.page.wait_for_timeout(1500)
     await snap("02_typed")
 
-    # Verify the value actually landed in the input
     typed_value = await pl.page.input_value(sel)
     pl.note = f"input_value={typed_value!r}"
 
-    # Submit via Enter — more reliable than clicking the React button
-    await pl.page.focus(sel)
-    await pl.page.keyboard.press("Enter")
-    await pl.page.wait_for_timeout(2500)
-    await snap("03_after_enter")
+    # Capture network requests during the submit attempt so we can see if
+    # Uber's auth backend is rejecting the request.
+    submit_traffic: list[dict] = []
 
-    # If still on the same URL with same form, the Enter didn't submit;
-    # try clicking the visible Continue button as a fallback.
-    if "auth.uber.com" in pl.page.url:
-        try:
-            btn = pl.page.get_by_role("button", name="Continue", exact=True).first
-            if await btn.is_enabled():
-                await btn.click()
-                await pl.page.wait_for_timeout(2500)
-                await snap("04_after_click")
-        except Exception as e:
-            pl.note += f" | click_err={e}"
+    def _on_req(req):
+        if "uber.com" in req.url and req.method != "GET":
+            submit_traffic.append({"url": req.url, "method": req.method, "headers": dict(req.headers), "post": (req.post_data or "")[:1000]})
 
-    # Final settle time for puzzle / OTP form to render
-    await pl.page.wait_for_timeout(5000)
-    await snap("05_settled")
+    def _on_resp(resp):
+        if "uber.com" in resp.url:
+            entry = next((t for t in submit_traffic if t["url"] == resp.url), None)
+            if entry:
+                entry["status"] = resp.status
+
+    pl.page.on("request", _on_req)
+    pl.page.on("response", _on_resp)
+
+    # Strategy 1: try the most React-friendly submit — find the submit-typed
+    # button by DOM walk and call .click() from inside the page context.
+    click_result = await pl.page.evaluate("""
+        () => {
+            const buttons = Array.from(document.querySelectorAll('button[type="submit"], button'));
+            const submit = buttons.find(b => b.type === 'submit') ||
+                           buttons.find(b => (b.innerText || '').trim() === 'Continue');
+            if (!submit) return {clicked: false, reason: 'no submit button found'};
+            const disabled = submit.disabled || submit.getAttribute('aria-disabled') === 'true';
+            submit.click();
+            return {clicked: true, disabled, text: (submit.innerText||'').trim().slice(0, 40)};
+        }
+    """)
+    pl.note += f" | js_click={click_result}"
+    await pl.page.wait_for_timeout(3000)
+    await snap("03_after_js_click")
+
+    # Strategy 2: if still on same URL, try form.requestSubmit() as a fallback
+    if "auth.uber.com/v2/" in pl.page.url and pl.page.url.endswith("v2/"):
+        rs_result = await pl.page.evaluate("""
+            () => {
+                const forms = Array.from(document.querySelectorAll('form'));
+                if (!forms.length) return 'no form found';
+                const f = forms[0];
+                if (f.requestSubmit) { f.requestSubmit(); return 'requestSubmit fired'; }
+                else { f.submit(); return 'submit() fired'; }
+            }
+        """)
+        pl.note += f" | form_submit={rs_result}"
+        await pl.page.wait_for_timeout(3000)
+        await snap("04_after_form_submit")
+
+    # Strategy 3: keyboard Enter on the focused input
+    if "auth.uber.com/v2/" in pl.page.url and pl.page.url.endswith("v2/"):
+        await pl.page.focus(sel)
+        await pl.page.keyboard.press("Enter")
+        await pl.page.wait_for_timeout(3000)
+        await snap("05_after_enter")
+
+    await pl.page.wait_for_timeout(4000)
+    await snap("06_settled")
 
     state = await _detect_next_step(pl.page)
     state["shots"] = shots
     state["note"] = pl.note
     state["typed_value"] = typed_value
+    state["submit_traffic"] = submit_traffic
     return state
 
 

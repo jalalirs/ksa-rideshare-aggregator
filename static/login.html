@@ -150,6 +150,7 @@ document.getElementById('send-otp').onclick = async () => {
         '<pre style="white-space:pre-wrap;">' + escapeHtml(JSON.stringify(info.inputs || [], null, 2)) + '</pre>' +
         (j.state && j.state.typed_value !== undefined ? '<div style="margin-top:6px;"><b>Value the input ended up with:</b> ' + escapeHtml(JSON.stringify(j.state.typed_value)) + '</div>' : '') +
         (j.state && j.state.note ? '<div><b>Note:</b> ' + escapeHtml(j.state.note) + '</div>' : '') +
+        (j.state && Array.isArray(j.state.submit_traffic) && j.state.submit_traffic.length ? '<div style="margin-top:6px;"><b>Network during submit:</b></div><pre style="white-space:pre-wrap;">' + escapeHtml(JSON.stringify(j.state.submit_traffic, null, 2)) + '</pre>' : (j.state && Array.isArray(j.state.submit_traffic) ? '<div style="margin-top:6px;"><b>Network during submit:</b> <i>no POST/PUT requests fired</i></div>' : '')) +
         '<div style="margin-top:6px;"><b>Raw state JSON:</b></div>' +
         '<pre style="white-space:pre-wrap;">' + escapeHtml(JSON.stringify(j.state, (k,v) => (k === 'screenshot' || k === 'shot' || k === 'shots') ? '[omitted]' : v, 2)) + '</pre>';
       showedAnything = true;
