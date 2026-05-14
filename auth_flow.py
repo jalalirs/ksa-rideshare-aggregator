@@ -24,7 +24,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
-from playwright_stealth import stealth_async
 
 PENDING_TTL_SECONDS = 480  # 8 min
 
@@ -173,10 +172,6 @@ async def _launch_stealth(pl: PendingLogin) -> None:
     )
     await _harden_context(pl.context)
     pl.page = await pl.context.new_page()
-    try:
-        await stealth_async(pl.page)
-    except Exception as e:
-        print(f"[stealth] application failed (non-fatal): {e}")
 
 
 async def _start_uber(pl: PendingLogin, phone: str) -> dict:
@@ -221,16 +216,25 @@ async def _start_uber(pl: PendingLogin, phone: str) -> dict:
 
     def _on_req(req):
         if "uber.com" in req.url and req.method != "GET":
-            submit_traffic.append({"url": req.url, "method": req.method, "headers": dict(req.headers), "post": (req.post_data or "")[:1000]})
+            submit_traffic.append({"url": req.url, "method": req.method, "headers": dict(req.headers), "post": (req.post_data or "")[:600]})
 
-    def _on_resp(resp):
-        if "uber.com" in resp.url:
-            entry = next((t for t in submit_traffic if t["url"] == resp.url), None)
-            if entry:
-                entry["status"] = resp.status
+    async def _on_resp(resp):
+        if "uber.com" not in resp.url:
+            return
+        entry = next((t for t in submit_traffic if t["url"] == resp.url), None)
+        if not entry:
+            return
+        entry["status"] = resp.status
+        # Capture body for the auth-relevant endpoints (skip _events analytics)
+        if "/_events" in resp.url:
+            return
+        try:
+            entry["resp_body"] = (await resp.text())[:2000]
+        except Exception:
+            pass
 
     pl.page.on("request", _on_req)
-    pl.page.on("response", _on_resp)
+    pl.page.on("response", lambda r: asyncio.create_task(_on_resp(r)))
 
     # Strategy 1: try the most React-friendly submit — find the submit-typed
     # button by DOM walk and call .click() from inside the page context.
