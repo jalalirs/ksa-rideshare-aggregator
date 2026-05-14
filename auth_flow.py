@@ -24,8 +24,59 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+from playwright_stealth import stealth_async
 
 PENDING_TTL_SECONDS = 480  # 8 min
+
+# Realistic desktop Chrome UA — datacenter IP + mobile UA is a suspicious combo
+# that automated-bot detectors flag immediately.
+DESKTOP_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+# Extra fingerprint spoofs applied via init script. Stealth handles most of
+# this but we layer some additional defenses for the Arkose / "Protecting your
+# account" puzzle that Uber shows from datacenter IPs.
+STEALTH_INIT_JS = """
+// Remove webdriver flag entirely
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+// Mimic plausible plugin set
+Object.defineProperty(navigator, 'plugins', {
+    get: () => [
+        { name: 'PDF Viewer', filename: 'internal-pdf-viewer' },
+        { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer' },
+        { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer' },
+    ],
+});
+
+Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en', 'ar'] });
+
+// Spoof a non-empty connection.rtt to look like a real network
+try {
+    const conn = navigator.connection || {};
+    Object.defineProperty(navigator, 'connection', {
+        get: () => Object.assign({}, conn, { rtt: 100, downlink: 10, effectiveType: '4g' }),
+    });
+} catch (e) {}
+
+// Chrome runtime presence — bots usually miss this
+window.chrome = window.chrome || { runtime: {} };
+
+// permissions.query: honor 'notifications' the way real Chrome does
+const _origQuery = navigator.permissions && navigator.permissions.query;
+if (_origQuery) {
+    navigator.permissions.query = (p) => (p && p.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission })
+        : _origQuery.call(navigator.permissions, p));
+}
+"""
+
+
+async def _harden_context(context: BrowserContext) -> None:
+    """Apply all anti-detection tricks before any navigation happens."""
+    await context.add_init_script(STEALTH_INIT_JS)
 
 
 @dataclass
@@ -95,46 +146,59 @@ async def gc_pending():
 # --------------------------------------------------------------------------
 
 
-async def _start_uber(pl: PendingLogin, phone: str) -> dict:
+async def _launch_stealth(pl: PendingLogin) -> None:
+    """Spin up a stealth-hardened browser context for this pending login."""
     pw_ctx = async_playwright()
     pl.pw_ctx = await pw_ctx.__aenter__()
-    pl.browser = await pl.pw_ctx.chromium.launch(headless=True)
-    pl.context = await pl.browser.new_context(
-        locale="en-SA",
-        timezone_id="Asia/Riyadh",
-        viewport={"width": 412, "height": 915},
-        user_agent="Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+    pl.browser = await pl.pw_ctx.chromium.launch(
+        headless=True,
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            "--no-sandbox",
+        ],
     )
+    pl.context = await pl.browser.new_context(
+        locale="en-US",
+        timezone_id="Asia/Riyadh",
+        viewport={"width": 1366, "height": 768},
+        user_agent=DESKTOP_UA,
+        extra_http_headers={
+            "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+            "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"macOS"',
+        },
+    )
+    await _harden_context(pl.context)
     pl.page = await pl.context.new_page()
+    try:
+        await stealth_async(pl.page)
+    except Exception as e:
+        print(f"[stealth] application failed (non-fatal): {e}")
+
+
+async def _start_uber(pl: PendingLogin, phone: str) -> dict:
+    await _launch_stealth(pl)
     await pl.page.goto("https://auth.uber.com/v2/", wait_until="domcontentloaded", timeout=45_000)
-    await pl.page.wait_for_timeout(2500)
+    await pl.page.wait_for_timeout(3500)
 
     await pl.page.fill("#PHONE_NUMBER_or_EMAIL_ADDRESS", phone)
-    await pl.page.wait_for_timeout(400)
+    await pl.page.wait_for_timeout(800)
 
-    # Find the visible "Continue" button (the first submit is the password-less continue)
     btn = pl.page.get_by_role("button", name="Continue", exact=False).first
     await btn.click()
-    await pl.page.wait_for_timeout(4000)
+    # Arkose / similar challenges typically render within 4-6s of submit
+    await pl.page.wait_for_timeout(6000)
 
-    # Detect what came next: OTP field, captcha, or error
     state = await _detect_next_step(pl.page)
     return state
 
 
 async def _start_careem(pl: PendingLogin, phone: str) -> dict:
-    pw_ctx = async_playwright()
-    pl.pw_ctx = await pw_ctx.__aenter__()
-    pl.browser = await pl.pw_ctx.chromium.launch(headless=True)
-    pl.context = await pl.browser.new_context(
-        locale="en-SA",
-        timezone_id="Asia/Riyadh",
-        viewport={"width": 412, "height": 915},
-        user_agent="Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
-    )
-    pl.page = await pl.context.new_page()
+    await _launch_stealth(pl)
     await pl.page.goto("https://app.careem.com/", wait_until="domcontentloaded", timeout=45_000)
-    await pl.page.wait_for_timeout(4000)
+    await pl.page.wait_for_timeout(4500)
 
     # Careem expects the local mobile number (placeholder "50 123 4567").
     # We strip any country code (e.g. "+9665..." → "5...").
@@ -170,7 +234,7 @@ async def _detect_next_step(page: Page) -> dict:
                 url: location.href,
                 heading: heading.trim().slice(0, 200),
                 text_sample: document.body.innerText.slice(0, 1200),
-                has_captcha: /captcha|i'm not a robot|recaptcha|hcaptcha|challenge[- ]?press/i.test(document.body.innerText) || !!document.querySelector('iframe[src*="captcha" i], iframe[src*="recaptcha" i], iframe[src*="hcaptcha" i]'),
+                has_captcha: /captcha|i'm not a robot|recaptcha|hcaptcha|challenge[- ]?press|protecting your account|solve this puzzle|start puzzle|real person|arkose|funcaptcha/i.test(document.body.innerText) || !!document.querySelector('iframe[src*="captcha" i], iframe[src*="recaptcha" i], iframe[src*="hcaptcha" i], iframe[src*="arkose" i], iframe[src*="funcaptcha" i], iframe[src*="bda-frame" i]'),
                 has_error: /try again|incorrect|invalid|too many|something went wrong|couldn't find|isn't recognized|not a valid|invalid phone/i.test(document.body.innerText),
                 inputs,
             };
