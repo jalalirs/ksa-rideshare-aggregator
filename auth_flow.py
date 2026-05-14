@@ -447,22 +447,22 @@ async def _submit_otp_generic(pl: PendingLogin, otp: str) -> dict:
 
     typed = ""
     if sel_info.get("multi"):
-        # Type one character per input, in order
+        # OTP UIs auto-advance focus on each keystroke. Re-clicking each input
+        # races with React's own focus management and times out. Instead: click
+        # the first input ONCE, then type all digits via the keyboard — React
+        # distributes them across the fields naturally.
         digits = [c for c in otp if c.strip()]
         sels = sel_info["selectors"]
         try:
-            for i, ch in enumerate(digits):
-                if i >= len(sels):
-                    break
-                s = sels[i]
-                await page.click(s)
-                await page.fill(s, "")
-                await page.type(s, ch, delay=60)
-                await page.wait_for_timeout(80)
+            await page.click(sels[0])
+            await page.wait_for_timeout(150)
+            for ch in digits[: len(sels)]:
+                await page.keyboard.type(ch, delay=80)
+                await page.wait_for_timeout(120)
             typed = "".join(digits[: len(sels)])
         except Exception as e:
             return {"ok": False, "reason": f"multi-fill failed: {e}", "selectors": sels, "input": sel_info, "shots": shots, "submit_traffic": submit_traffic}
-        sel = sels[-1]  # for any later focus needed
+        sel = sels[-1]
     else:
         if sel_info.get("id"):
             sel = f"#{sel_info['id']}"
