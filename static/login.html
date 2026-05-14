@@ -191,11 +191,25 @@ document.getElementById('verify-otp').onclick = async () => {
     const j = await r.json();
     if (!r.ok || !j.ok) {
       status('otp-status', 'err', 'Failed: ' + (j.reason || j.detail || JSON.stringify(j)));
-      if (j.screenshot) {
-        const img = document.getElementById('screenshot');
-        img.src = 'data:image/png;base64,' + j.screenshot;
-        img.classList.remove('hide');
+      // Render verify-step screenshots + traffic in the same diag card
+      const diagCard = document.getElementById('diag-card');
+      diagCard.classList.remove('hide');
+      if (Array.isArray(j.shots) && j.shots.length) {
+        const strip = document.getElementById('shots-strip');
+        strip.innerHTML = j.shots.map(s =>
+          `<div style="margin: 8px 0;"><div class="small"><b>${escapeHtml(s.label)}</b> — ${escapeHtml(s.url)}</div>` +
+          (s.shot ? `<img class="shot" src="data:image/png;base64,${s.shot}" />` : '<div class="small">(no screenshot)</div>') +
+          `</div>`
+        ).join('');
       }
+      const dbg = document.getElementById('debug');
+      dbg.classList.remove('hide');
+      dbg.innerHTML =
+        '<div><b>Selector tried:</b> ' + escapeHtml(j.selector || '(none)') + '</div>' +
+        '<div><b>Input found:</b> <pre style="white-space:pre-wrap;">' + escapeHtml(JSON.stringify(j.input || null, null, 2)) + '</pre></div>' +
+        '<div><b>Typed value:</b> ' + escapeHtml(JSON.stringify(j.typed)) + '</div>' +
+        '<div><b>Click result:</b> <pre style="white-space:pre-wrap;">' + escapeHtml(JSON.stringify(j.click_result || null, null, 2)) + '</pre></div>' +
+        (Array.isArray(j.submit_traffic) && j.submit_traffic.length ? '<div><b>Network during verify:</b></div><pre style="white-space:pre-wrap;">' + escapeHtml(JSON.stringify(j.submit_traffic, null, 2)) + '</pre>' : '<div><b>Network during verify:</b> <i>no requests</i></div>');
       return;
     }
     status('otp-status', 'ok', `Signed in to ${j.provider}. Redirecting…`);

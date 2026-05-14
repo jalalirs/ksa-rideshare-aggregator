@@ -373,59 +373,126 @@ async def _verify_careem(pl: PendingLogin, otp: str) -> dict:
 
 async def _submit_otp_generic(pl: PendingLogin, otp: str) -> dict:
     page = pl.page
+    shots: list[dict] = []
+    submit_traffic: list[dict] = []
+
+    async def snap(label: str):
+        shots.append({"label": label, "url": page.url, "shot": await _screenshot_b64(page)})
+
+    def _on_req(req):
+        if "uber.com" in req.url and req.method != "GET" and "/_events" not in req.url:
+            submit_traffic.append({"url": req.url, "method": req.method, "post": (req.post_data or "")[:600]})
+
+    async def _on_resp(resp):
+        if "uber.com" not in resp.url or "/_events" in resp.url:
+            return
+        entry = next((t for t in submit_traffic if t["url"] == resp.url), None)
+        if not entry:
+            return
+        entry["status"] = resp.status
+        try:
+            entry["resp_body"] = (await resp.text())[:2000]
+        except Exception:
+            pass
+
+    page.on("request", _on_req)
+    page.on("response", lambda r: asyncio.create_task(_on_resp(r)))
+
+    await snap("01_otp_loaded")
+
     # Locate OTP input adaptively.
-    sel = await page.evaluate("""
+    sel_info = await page.evaluate("""
         () => {
             const inputs = Array.from(document.querySelectorAll('input')).filter(i => i.offsetParent !== null);
-            // Try strongest signals first: autocomplete="one-time-code"
             let pick = inputs.find(i => (i.autocomplete||'').toLowerCase().includes('one-time'));
-            if (pick) return pick.id || pick.name || null;
-            // Match name/id/placeholder/aria for OTP-ish wording
-            const re = /(otp|code|verif|pin|one.time)/i;
-            pick = inputs.find(i => re.test(i.name || '') || re.test(i.id || '') || re.test(i.placeholder || '') || re.test(i.getAttribute('aria-label')||''));
-            if (pick) return pick.id ? '#' + pick.id : (pick.name ? `input[name="${pick.name}"]` : 'input[type="tel"], input[type="text"], input[type="number"]');
-            // Fallback: any visible numeric input
-            pick = inputs.find(i => ['tel','number','text','password'].includes(i.type));
-            if (pick) return pick.id ? '#' + pick.id : (pick.name ? `input[name="${pick.name}"]` : null);
-            return null;
+            if (!pick) {
+                const re = /(otp|code|verif|pin|one.time)/i;
+                pick = inputs.find(i => re.test(i.name||'') || re.test(i.id||'') || re.test(i.placeholder||'') || re.test(i.getAttribute('aria-label')||''));
+            }
+            if (!pick) {
+                pick = inputs.find(i => ['tel','number','text','password'].includes(i.type));
+            }
+            if (!pick) return null;
+            return {
+                tag: pick.tagName, type: pick.type, id: pick.id, name: pick.name,
+                placeholder: pick.placeholder, ac: pick.autocomplete,
+                aria: pick.getAttribute('aria-label')||'',
+            };
         }
     """)
-    if not sel:
-        return {"ok": False, "reason": "no OTP input found", "screenshot": await _screenshot_b64(page)}
+    if not sel_info:
+        return {"ok": False, "reason": "no OTP input found", "shots": shots, "submit_traffic": submit_traffic}
+
+    # Build a robust selector — prefer id, then name, then a generic input
+    if sel_info.get("id"):
+        sel = f"#{sel_info['id']}"
+    elif sel_info.get("name"):
+        sel = f'input[name="{sel_info["name"]}"]'
+    else:
+        sel = 'input[type="tel"], input[type="number"], input[type="text"]'
 
     try:
-        if sel.startswith("#") or sel.startswith("input"):
-            await page.fill(sel, otp)
-        else:
-            await page.locator(f"#{sel}").fill(otp)
+        await page.click(sel)
+        await page.fill(sel, "")
+        await page.type(sel, otp, delay=80)
     except Exception as e:
-        return {"ok": False, "reason": f"fill failed: {e}", "screenshot": await _screenshot_b64(page)}
+        return {"ok": False, "reason": f"fill failed: {e}", "selector": sel, "input": sel_info, "shots": shots, "submit_traffic": submit_traffic}
 
-    await page.wait_for_timeout(600)
+    await page.wait_for_timeout(800)
+    typed = await page.input_value(sel)
+    await snap("02_otp_typed")
 
-    # Try to find and click a "Verify" / "Continue" / "Next" button
-    for name in ["Verify", "Continue", "Next", "Submit", "Confirm"]:
-        try:
-            btn = page.get_by_role("button", name=name, exact=False).first
-            if await btn.count() > 0:
-                await btn.click()
-                break
-        except Exception:
-            continue
-    # Some flows auto-submit on 4th/6th digit; either way wait a bit.
-    await page.wait_for_timeout(6000)
+    # Submit via JS click of the submit button (most React-friendly)
+    click_result = await page.evaluate("""
+        () => {
+            const buttons = Array.from(document.querySelectorAll('button'));
+            const submit = buttons.find(b => b.type === 'submit') ||
+                           buttons.find(b => /verify|continue|next|submit|confirm/i.test((b.innerText||'').trim()));
+            if (!submit) return {clicked: false};
+            submit.click();
+            return {clicked: true, text: (submit.innerText||'').trim().slice(0, 40), disabled: submit.disabled};
+        }
+    """)
+    await page.wait_for_timeout(3500)
+    await snap("03_after_click")
+
+    # Fallback: form.requestSubmit
+    if "auth.uber.com/v2/" in page.url:
+        rs = await page.evaluate("""
+            () => {
+                const f = document.querySelector('form');
+                if (!f) return 'no form';
+                if (f.requestSubmit) { f.requestSubmit(); return 'requestSubmit'; }
+                f.submit(); return 'submit';
+            }
+        """)
+        await page.wait_for_timeout(3500)
+        await snap("04_after_form_submit")
+
+    # Fallback: keyboard Enter
+    if "auth.uber.com/v2/" in page.url:
+        await page.focus(sel)
+        await page.keyboard.press("Enter")
+        await page.wait_for_timeout(3500)
+        await snap("05_after_enter")
+
+    await page.wait_for_timeout(4000)
+    await snap("06_settled")
 
     final_url = page.url
-    text = (await page.content()).lower()
     looks_authenticated = (
         "auth.uber.com" not in final_url and "auth.careem.com" not in final_url
         and "/login" not in final_url
     )
     if not looks_authenticated:
-        return {"ok": False, "reason": "still on auth page", "url": final_url, "screenshot": await _screenshot_b64(page)}
+        return {
+            "ok": False, "reason": "still on auth page", "url": final_url,
+            "selector": sel, "input": sel_info, "typed": typed,
+            "click_result": click_result, "shots": shots, "submit_traffic": submit_traffic,
+        }
 
     storage = await pl.context.storage_state()
-    return {"ok": True, "storage_state": storage, "url": final_url}
+    return {"ok": True, "storage_state": storage, "url": final_url, "shots": shots, "submit_traffic": submit_traffic}
 
 
 # --------------------------------------------------------------------------
