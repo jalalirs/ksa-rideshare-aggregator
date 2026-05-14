@@ -62,6 +62,10 @@
     <input id="otp" type="tel" inputmode="numeric" maxlength="8" placeholder="123456" autocomplete="one-time-code" />
     <button id="verify-otp">Verify</button>
     <div id="otp-status"></div>
+  </div>
+
+  <div class="card hide" id="diag-card">
+    <h2>What the server saw</h2>
     <img id="screenshot" class="shot hide" alt="server screenshot" />
     <div id="debug" class="hide" style="font-size: 12px; color: #555; margin-top: 12px;"></div>
   </div>
@@ -115,23 +119,29 @@ document.getElementById('send-otp').onclick = async () => {
     const info = j.state && j.state.info;
 
     // Always show what the server's headless browser actually rendered.
+    const diagCard = document.getElementById('diag-card');
+    let showedAnything = false;
     if (j.state && j.state.screenshot) {
       const img = document.getElementById('screenshot');
       img.src = 'data:image/png;base64,' + j.state.screenshot;
       img.classList.remove('hide');
+      showedAnything = true;
     }
     if (info) {
       const dbg = document.getElementById('debug');
       dbg.classList.remove('hide');
       dbg.innerHTML =
-        '<div><b>Server saw:</b></div>' +
         '<div><b>URL:</b> ' + escapeHtml(info.url || '') + '</div>' +
         (info.heading ? '<div><b>Heading:</b> ' + escapeHtml(info.heading) + '</div>' : '') +
-        '<div><b>Page text (first 600 chars):</b></div>' +
-        '<pre>' + escapeHtml((info.text_sample || '').slice(0, 600)) + '</pre>' +
-        '<div><b>Visible inputs:</b></div>' +
-        '<pre>' + escapeHtml(JSON.stringify(info.inputs || [], null, 2)) + '</pre>';
+        '<div style="margin-top:6px;"><b>Page text (first 600 chars):</b></div>' +
+        '<pre style="white-space:pre-wrap;">' + escapeHtml((info.text_sample || '').slice(0, 600)) + '</pre>' +
+        '<div style="margin-top:6px;"><b>Visible inputs:</b></div>' +
+        '<pre style="white-space:pre-wrap;">' + escapeHtml(JSON.stringify(info.inputs || [], null, 2)) + '</pre>' +
+        '<div style="margin-top:6px;"><b>Raw state JSON:</b></div>' +
+        '<pre style="white-space:pre-wrap;">' + escapeHtml(JSON.stringify(j.state, (k,v) => k === 'screenshot' ? '[base64 omitted]' : v, 2)) + '</pre>';
+      showedAnything = true;
     }
+    if (showedAnything) diagCard.classList.remove('hide');
 
     if (next === 'otp') {
       status('phone-status', 'ok', 'OTP input detected on Uber/Careem page. Enter the code from your SMS below.');
