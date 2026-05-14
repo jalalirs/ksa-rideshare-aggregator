@@ -484,39 +484,45 @@ async def _submit_otp_generic(pl: PendingLogin, otp: str) -> dict:
     await page.wait_for_timeout(1000)
     await snap("02_otp_typed")
 
+    # Many OTP UIs auto-submit when the last digit is typed — give it time
+    # before we try anything else.
+    await page.wait_for_timeout(2500)
+    await snap("03_after_autosubmit_wait")
+
     # Submit via JS click of the submit button (most React-friendly)
-    click_result = await page.evaluate("""
-        () => {
-            const buttons = Array.from(document.querySelectorAll('button'));
-            const submit = buttons.find(b => b.type === 'submit') ||
-                           buttons.find(b => /verify|continue|next|submit|confirm/i.test((b.innerText||'').trim()));
-            if (!submit) return {clicked: false};
-            submit.click();
-            return {clicked: true, text: (submit.innerText||'').trim().slice(0, 40), disabled: submit.disabled};
-        }
-    """)
-    await page.wait_for_timeout(3500)
-    await snap("03_after_click")
+    click_result = None
+    if "auth.uber.com/v2/" in page.url:
+        try:
+            click_result = await page.evaluate("""
+                () => {
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    const submit = buttons.find(b => b.type === 'submit') ||
+                                   buttons.find(b => /verify|continue|next|submit|confirm/i.test((b.innerText||'').trim()));
+                    if (!submit) return {clicked: false};
+                    submit.click();
+                    return {clicked: true, text: (submit.innerText||'').trim().slice(0, 40), disabled: submit.disabled};
+                }
+            """)
+        except Exception as e:
+            click_result = {"err": str(e)}
+        await page.wait_for_timeout(3500)
+        await snap("04_after_click")
 
     # Fallback: form.requestSubmit
     if "auth.uber.com/v2/" in page.url:
-        rs = await page.evaluate("""
-            () => {
-                const f = document.querySelector('form');
-                if (!f) return 'no form';
-                if (f.requestSubmit) { f.requestSubmit(); return 'requestSubmit'; }
-                f.submit(); return 'submit';
-            }
-        """)
-        await page.wait_for_timeout(3500)
-        await snap("04_after_form_submit")
-
-    # Fallback: keyboard Enter
-    if "auth.uber.com/v2/" in page.url:
-        await page.focus(sel)
-        await page.keyboard.press("Enter")
-        await page.wait_for_timeout(3500)
-        await snap("05_after_enter")
+        try:
+            await page.evaluate("""
+                () => {
+                    const f = document.querySelector('form');
+                    if (!f) return 'no form';
+                    if (f.requestSubmit) { f.requestSubmit(); return 'requestSubmit'; }
+                    f.submit(); return 'submit';
+                }
+            """)
+            await page.wait_for_timeout(3500)
+            await snap("05_after_form_submit")
+        except Exception:
+            pass
 
     await page.wait_for_timeout(4000)
     await snap("06_settled")
