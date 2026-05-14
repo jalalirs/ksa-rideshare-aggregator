@@ -19,8 +19,9 @@ class CareemProvider(Provider):
         re.I,
     )
 
-    async def fetch(self, pickup: Location, dropoff: Location) -> list[FareQuote]:
-        if not self.has_session():
+    async def fetch(self, pickup: Location, dropoff: Location, storage_state: dict | None = None) -> list[FareQuote]:
+        storage = self.resolve_storage(storage_state)
+        if storage is None:
             return []
 
         payloads: list[dict[str, Any]] = []
@@ -28,7 +29,7 @@ class CareemProvider(Provider):
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             ctx = await browser.new_context(
-                storage_state=str(self.session_path()),
+                storage_state=storage,
                 locale="en-SA",
                 timezone_id="Asia/Riyadh",
                 geolocation={"latitude": pickup.lat, "longitude": pickup.lng},

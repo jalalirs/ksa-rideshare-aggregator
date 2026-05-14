@@ -72,20 +72,25 @@ async function checkHealth() {
   try {
     const r = await fetch('/api/health');
     const j = await r.json();
-    const ready = j.providers.filter(p => p.ready).map(p => p.name);
-    const missing = j.providers.filter(p => !p.ready).map(p => p.name);
-    if (missing.length === 0) {
-      el.className = 'status ok'; el.textContent = `All ${ready.length} provider sessions loaded.`;
-    } else if (ready.length === 0) {
-      el.className = 'status err';
-      el.textContent = `No provider sessions loaded — run auth.py for: ${missing.join(', ')}`;
+    const signedIn = j.providers.filter(p => p.session).map(p => p.name);
+    const missing = j.providers.filter(p => !p.session && !p.local_demo_session).map(p => p.name);
+    if (signedIn.length === j.providers.length) {
+      el.className = 'status ok'; el.innerHTML = `Signed in to: ${signedIn.join(', ')}. <a href="/login">Add another</a> · <a href="#" onclick="logout()">Sign out</a>`;
+    } else if (signedIn.length === 0) {
+      el.className = 'status warn';
+      el.innerHTML = `Not signed in. <a href="/login">Sign in →</a>`;
     } else {
       el.className = 'status warn';
-      el.textContent = `Ready: ${ready.join(', ')}. Not authed: ${missing.join(', ')}`;
+      el.innerHTML = `Signed in: ${signedIn.join(', ') || 'none'}. Missing: ${missing.join(', ')}. <a href="/login">Sign in →</a>`;
     }
   } catch (e) {
     el.className = 'status err'; el.textContent = 'Health check failed: ' + e.message;
   }
+}
+
+async function logout() {
+  await fetch('/api/auth/logout', { method: 'POST' });
+  location.reload();
 }
 
 function parseCoord(s) {

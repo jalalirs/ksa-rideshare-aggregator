@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sign in — KSA Rideshare</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; background: #f7f7f8; color: #111; min-height: 100vh; }
+  header { padding: 16px 20px; background: #111; color: #fff; }
+  header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+  header .sub { font-size: 12px; opacity: 0.7; margin-top: 2px; }
+  main { max-width: 480px; margin: 0 auto; padding: 16px; }
+  .card { background: #fff; border-radius: 12px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); margin-bottom: 12px; }
+  h2 { margin: 0 0 12px; font-size: 16px; }
+  label { display: block; font-size: 12px; color: #555; margin-bottom: 4px; }
+  input { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font: inherit; margin-bottom: 12px; }
+  button { width: 100%; padding: 12px; border: 0; background: #111; color: #fff; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 15px; }
+  button:hover { background: #333; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .row { display: flex; gap: 8px; }
+  .row > .seg { flex: 1; padding: 10px; text-align: center; border: 1px solid #ddd; border-radius: 8px; cursor: pointer; background: #fafafa; font-weight: 600; font-size: 14px; }
+  .row > .seg.active { background: #111; color: #fff; border-color: #111; }
+  .status { padding: 10px; border-radius: 8px; margin: 12px 0; font-size: 13px; }
+  .status.ok { background: #e6f4ea; color: #137333; }
+  .status.warn { background: #fef7e0; color: #b06000; }
+  .status.err { background: #fce8e6; color: #c5221f; }
+  .small { font-size: 12px; color: #777; margin-top: -6px; margin-bottom: 12px; }
+  .center { text-align: center; }
+  a { color: #111; }
+  .hide { display: none; }
+  img.shot { max-width: 100%; border-radius: 8px; margin: 8px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Sign in</h1>
+  <div class="sub">Authenticate with Uber or Careem to see your fares</div>
+</header>
+
+<main>
+  <div class="card">
+    <h2>1. Choose provider</h2>
+    <div class="row" id="provider-row">
+      <div class="seg active" data-provider="uber">Uber</div>
+      <div class="seg" data-provider="careem">Careem</div>
+    </div>
+  </div>
+
+  <div class="card" id="step-phone">
+    <h2>2. Your phone</h2>
+    <label>International format starts with +966 for Saudi Arabia</label>
+    <input id="phone" type="tel" placeholder="+9665XXXXXXXX" />
+    <div class="small">An SMS code will be sent to this number.</div>
+    <button id="send-otp">Send OTP</button>
+    <div id="phone-status"></div>
+  </div>
+
+  <div class="card hide" id="step-otp">
+    <h2>3. Enter OTP</h2>
+    <label>Code from the SMS just sent</label>
+    <input id="otp" type="tel" inputmode="numeric" maxlength="8" placeholder="123456" autocomplete="one-time-code" />
+    <button id="verify-otp">Verify</button>
+    <div id="otp-status"></div>
+    <img id="screenshot" class="shot hide" alt="server screenshot" />
+  </div>
+
+  <div class="card center">
+    <a href="/">← Back to fare comparison</a>
+  </div>
+</main>
+
+<script>
+let chosen = 'uber';
+let loginId = null;
+
+document.querySelectorAll('#provider-row .seg').forEach(el => {
+  el.onclick = () => {
+    document.querySelectorAll('#provider-row .seg').forEach(s => s.classList.remove('active'));
+    el.classList.add('active');
+    chosen = el.dataset.provider;
+  };
+});
+
+function status(elId, klass, text) {
+  const el = document.getElementById(elId);
+  el.className = 'status ' + klass;
+  el.textContent = text;
+}
+
+document.getElementById('send-otp').onclick = async () => {
+  const phone = document.getElementById('phone').value.trim();
+  if (!phone) { status('phone-status', 'err', 'Enter a phone number first.'); return; }
+  const btn = document.getElementById('send-otp');
+  btn.disabled = true; btn.textContent = 'Sending…';
+  status('phone-status', 'warn', `Reaching ${chosen} login page (this may take 10–20s)…`);
+
+  try {
+    const r = await fetch('/api/auth/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: chosen, phone }),
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) {
+      status('phone-status', 'err', 'Error: ' + (j.detail || j.reason || JSON.stringify(j)));
+      return;
+    }
+    loginId = j.login_id;
+    const next = j.state && j.state.next;
+    if (next === 'otp') {
+      status('phone-status', 'ok', 'SMS sent. Enter the code below.');
+      document.getElementById('step-otp').classList.remove('hide');
+      document.getElementById('otp').focus();
+    } else if (next === 'captcha') {
+      status('phone-status', 'err', 'Captcha challenge appeared on the provider login page. This usually means the deployment IP is flagged. Try again later or run locally.');
+      if (j.state.screenshot) {
+        const img = document.getElementById('screenshot');
+        img.src = 'data:image/png;base64,' + j.state.screenshot;
+        img.classList.remove('hide');
+      }
+    } else {
+      status('phone-status', 'warn', 'Unexpected next step: ' + next + '. Showing screenshot.');
+      if (j.state && j.state.screenshot) {
+        const img = document.getElementById('screenshot');
+        img.src = 'data:image/png;base64,' + j.state.screenshot;
+        img.classList.remove('hide');
+        document.getElementById('step-otp').classList.remove('hide');
+      }
+    }
+  } catch (e) {
+    status('phone-status', 'err', 'Request failed: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Send OTP';
+  }
+};
+
+document.getElementById('verify-otp').onclick = async () => {
+  const otp = document.getElementById('otp').value.trim();
+  if (!otp) { status('otp-status', 'err', 'Enter the OTP first.'); return; }
+  if (!loginId) { status('otp-status', 'err', 'Restart from step 2.'); return; }
+  const btn = document.getElementById('verify-otp');
+  btn.disabled = true; btn.textContent = 'Verifying…';
+  status('otp-status', 'warn', 'Submitting OTP…');
+
+  try {
+    const r = await fetch('/api/auth/verify', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ login_id: loginId, otp }),
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) {
+      status('otp-status', 'err', 'Failed: ' + (j.reason || j.detail || JSON.stringify(j)));
+      if (j.screenshot) {
+        const img = document.getElementById('screenshot');
+        img.src = 'data:image/png;base64,' + j.screenshot;
+        img.classList.remove('hide');
+      }
+      return;
+    }
+    status('otp-status', 'ok', `Signed in to ${j.provider}. Redirecting…`);
+    setTimeout(() => { location.href = '/'; }, 1200);
+  } catch (e) {
+    status('otp-status', 'err', 'Request failed: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Verify';
+  }
+};
+</script>
+</body>
+</html>

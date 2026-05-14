@@ -50,14 +50,23 @@ class Provider:
     name: str
     session_file: str
 
-    async def fetch(self, pickup: Location, dropoff: Location) -> list[FareQuote]:
+    async def fetch(self, pickup: Location, dropoff: Location, storage_state: dict | None = None) -> list[FareQuote]:
+        """Fetch fare quotes. If storage_state is None, falls back to local file (dev mode)."""
         raise NotImplementedError
 
     def session_path(self) -> Path:
         return SESSIONS / self.session_file
 
-    def has_session(self) -> bool:
+    def has_local_session(self) -> bool:
         return self.session_path().exists()
+
+    def resolve_storage(self, storage_state: dict | None) -> dict | str | None:
+        """Return either an inline dict for Playwright or a file path; None if nothing."""
+        if storage_state:
+            return storage_state
+        if self.has_local_session():
+            return str(self.session_path())
+        return None
 
 
 def walk_products(node: Any):
