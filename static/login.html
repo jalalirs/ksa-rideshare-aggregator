@@ -66,7 +66,8 @@
 
   <div class="card hide" id="diag-card">
     <h2>What the server saw</h2>
-    <img id="screenshot" class="shot hide" alt="server screenshot" />
+    <div id="shots-strip"></div>
+    <img id="screenshot" class="shot hide" alt="final server screenshot" />
     <div id="debug" class="hide" style="font-size: 12px; color: #555; margin-top: 12px;"></div>
   </div>
 
@@ -121,7 +122,17 @@ document.getElementById('send-otp').onclick = async () => {
     // Always show what the server's headless browser actually rendered.
     const diagCard = document.getElementById('diag-card');
     let showedAnything = false;
-    if (j.state && j.state.screenshot) {
+
+    // Step-by-step screenshots if available
+    if (j.state && Array.isArray(j.state.shots) && j.state.shots.length) {
+      const strip = document.getElementById('shots-strip');
+      strip.innerHTML = j.state.shots.map(s =>
+        `<div style="margin: 8px 0;"><div class="small"><b>${escapeHtml(s.label)}</b> — ${escapeHtml(s.url)}</div>` +
+        (s.shot ? `<img class="shot" src="data:image/png;base64,${s.shot}" />` : '<div class="small">(no screenshot)</div>') +
+        `</div>`
+      ).join('');
+      showedAnything = true;
+    } else if (j.state && j.state.screenshot) {
       const img = document.getElementById('screenshot');
       img.src = 'data:image/png;base64,' + j.state.screenshot;
       img.classList.remove('hide');
@@ -137,8 +148,10 @@ document.getElementById('send-otp').onclick = async () => {
         '<pre style="white-space:pre-wrap;">' + escapeHtml((info.text_sample || '').slice(0, 600)) + '</pre>' +
         '<div style="margin-top:6px;"><b>Visible inputs:</b></div>' +
         '<pre style="white-space:pre-wrap;">' + escapeHtml(JSON.stringify(info.inputs || [], null, 2)) + '</pre>' +
+        (j.state && j.state.typed_value !== undefined ? '<div style="margin-top:6px;"><b>Value the input ended up with:</b> ' + escapeHtml(JSON.stringify(j.state.typed_value)) + '</div>' : '') +
+        (j.state && j.state.note ? '<div><b>Note:</b> ' + escapeHtml(j.state.note) + '</div>' : '') +
         '<div style="margin-top:6px;"><b>Raw state JSON:</b></div>' +
-        '<pre style="white-space:pre-wrap;">' + escapeHtml(JSON.stringify(j.state, (k,v) => k === 'screenshot' ? '[base64 omitted]' : v, 2)) + '</pre>';
+        '<pre style="white-space:pre-wrap;">' + escapeHtml(JSON.stringify(j.state, (k,v) => (k === 'screenshot' || k === 'shot' || k === 'shots') ? '[omitted]' : v, 2)) + '</pre>';
       showedAnything = true;
     }
     if (showedAnything) diagCard.classList.remove('hide');

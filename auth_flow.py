@@ -180,18 +180,61 @@ async def _launch_stealth(pl: PendingLogin) -> None:
 
 async def _start_uber(pl: PendingLogin, phone: str) -> dict:
     await _launch_stealth(pl)
+    shots: list[dict] = []
+
+    async def snap(label: str):
+        shots.append({"label": label, "url": pl.page.url, "shot": await _screenshot_b64(pl.page)})
+
     await pl.page.goto("https://auth.uber.com/v2/", wait_until="domcontentloaded", timeout=45_000)
-    await pl.page.wait_for_timeout(3500)
+    # React hydration on Uber's auth page takes 3-5s
+    await pl.page.wait_for_timeout(5000)
+    await snap("01_loaded")
 
-    await pl.page.fill("#PHONE_NUMBER_or_EMAIL_ADDRESS", phone)
-    await pl.page.wait_for_timeout(800)
+    # Uber's React-form: page already has Saudi country selected (🇸🇦), so the
+    # input should receive the local mobile number, not the +966 prefix. We
+    # also need to use page.type() with delay rather than fill() so React's
+    # onChange handlers actually fire.
+    local = phone.lstrip("+").lstrip("0")
+    if local.startswith("966"):
+        local = local[3:]  # strip Saudi country code
 
-    btn = pl.page.get_by_role("button", name="Continue", exact=False).first
-    await btn.click()
-    # Arkose / similar challenges typically render within 4-6s of submit
-    await pl.page.wait_for_timeout(6000)
+    sel = "#PHONE_NUMBER_or_EMAIL_ADDRESS"
+    await pl.page.click(sel)
+    await pl.page.fill(sel, "")  # clear first
+    await pl.page.type(sel, local, delay=80)
+    await pl.page.wait_for_timeout(1200)
+    await snap("02_typed")
+
+    # Verify the value actually landed in the input
+    typed_value = await pl.page.input_value(sel)
+    pl.note = f"input_value={typed_value!r}"
+
+    # Submit via Enter — more reliable than clicking the React button
+    await pl.page.focus(sel)
+    await pl.page.keyboard.press("Enter")
+    await pl.page.wait_for_timeout(2500)
+    await snap("03_after_enter")
+
+    # If still on the same URL with same form, the Enter didn't submit;
+    # try clicking the visible Continue button as a fallback.
+    if "auth.uber.com" in pl.page.url:
+        try:
+            btn = pl.page.get_by_role("button", name="Continue", exact=True).first
+            if await btn.is_enabled():
+                await btn.click()
+                await pl.page.wait_for_timeout(2500)
+                await snap("04_after_click")
+        except Exception as e:
+            pl.note += f" | click_err={e}"
+
+    # Final settle time for puzzle / OTP form to render
+    await pl.page.wait_for_timeout(5000)
+    await snap("05_settled")
 
     state = await _detect_next_step(pl.page)
+    state["shots"] = shots
+    state["note"] = pl.note
+    state["typed_value"] = typed_value
     return state
 
 
