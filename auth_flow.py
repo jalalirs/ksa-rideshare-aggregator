@@ -152,41 +152,51 @@ async def _start_careem(pl: PendingLogin, phone: str) -> dict:
 
 
 async def _detect_next_step(page: Page) -> dict:
-    """Look at the page and decide whether we need OTP, captcha, or are done."""
+    """Look at the page and decide whether we need OTP, captcha, or are done.
+
+    We always include a screenshot so the client can verify what the server is
+    actually seeing — the heuristics here are necessarily fragile.
+    """
     info = await page.evaluate("""
         () => {
-            const text = document.body.innerText.toLowerCase();
             const inputs = Array.from(document.querySelectorAll('input')).map(i => ({
                 type: i.type, name: i.name||'', id: i.id||'',
                 placeholder: i.placeholder||'', aria: i.getAttribute('aria-label')||'',
                 autocomplete: i.autocomplete||'',
                 visible: i.offsetParent !== null,
             })).filter(i => i.visible);
+            const heading = (document.querySelector('h1, h2, [role="heading"]')||{}).innerText || '';
             return {
-                url: location.href, text_sample: text.slice(0, 600),
-                has_otp_text: /verification|verify|otp|code|enter the (4|6)-digit|sent (you|to)/i.test(document.body.innerText),
-                has_captcha: /captcha|i'm not a robot|challenge|recaptcha/i.test(document.body.innerText) || !!document.querySelector('iframe[src*="captcha" i], iframe[src*="recaptcha" i]'),
-                has_error: /try again|incorrect|invalid|too many|something went wrong/i.test(document.body.innerText),
+                url: location.href,
+                heading: heading.trim().slice(0, 200),
+                text_sample: document.body.innerText.slice(0, 1200),
+                has_captcha: /captcha|i'm not a robot|recaptcha|hcaptcha|challenge[- ]?press/i.test(document.body.innerText) || !!document.querySelector('iframe[src*="captcha" i], iframe[src*="recaptcha" i], iframe[src*="hcaptcha" i]'),
+                has_error: /try again|incorrect|invalid|too many|something went wrong|couldn't find|isn't recognized|not a valid|invalid phone/i.test(document.body.innerText),
                 inputs,
             };
         }
     """)
-    if info["has_captcha"]:
-        return {"next": "captcha", "screenshot": await _screenshot_b64(page), "info": info}
-    # Look for OTP-shaped input: type=number/tel + (autocomplete contains 'one-time' or aria/placeholder mentions code/verification)
+    screenshot = await _screenshot_b64(page)
+
+    # Strong signal: a visible input that explicitly looks like an OTP field.
     otp_input = None
     for i in info["inputs"]:
         sig = " ".join([i["name"], i["id"], i["placeholder"], i["aria"], i["autocomplete"]]).lower()
         if i["type"] in ("number", "tel", "text", "password") and any(
-            kw in sig for kw in ("otp", "code", "verif", "one-time", "pin")
+            kw in sig for kw in ("one-time", "otp", "verif", "pin")
         ):
             otp_input = i
             break
-    if otp_input or info["has_otp_text"]:
-        return {"next": "otp", "info": info, "otp_input": otp_input}
+
+    if info["has_captcha"]:
+        return {"next": "captcha", "screenshot": screenshot, "info": info}
+    if otp_input:
+        return {"next": "otp", "info": info, "otp_input": otp_input, "screenshot": screenshot}
     if info["has_error"]:
-        return {"next": "error", "info": info, "screenshot": await _screenshot_b64(page)}
-    return {"next": "unknown", "info": info, "screenshot": await _screenshot_b64(page)}
+        return {"next": "error", "info": info, "screenshot": screenshot}
+    # Default to "unknown" with the full picture — the UI shows screenshot + text
+    # so the user can tell us what actually appeared.
+    return {"next": "unknown", "info": info, "screenshot": screenshot}
 
 
 async def _verify_uber(pl: PendingLogin, otp: str) -> dict:
