@@ -170,16 +170,32 @@ async def auth_verify(req: AuthVerifyReq, response: Response):
     if not req.otp.strip():
         raise HTTPException(400, "otp required")
     result = await auth_flow.verify(req.login_id, req.otp.strip())
-    if not result.get("ok"):
-        # Strip oversized fields from error responses to keep them under 1MB
-        result.pop("storage_state", None)
-        return JSONResponse(result, status_code=400)
+    return await _finish_auth_step(result, response)
 
-    provider = result["provider"]
-    storage = result["storage_state"]
-    sid = await db.save_session(provider, storage)
-    response.set_cookie(cookie_name(provider), sid, **COOKIE_KW)
-    return {"ok": True, "provider": provider}
+
+class AuthAnswerReq(BaseModel):
+    login_id: str
+    value: str
+
+
+@app.post("/api/auth/answer")
+async def auth_answer(req: AuthAnswerReq, response: Response):
+    if not req.value.strip():
+        raise HTTPException(400, "value required")
+    result = await auth_flow.answer(req.login_id, req.value.strip())
+    return await _finish_auth_step(result, response)
+
+
+async def _finish_auth_step(result: dict, response: Response):
+    if result.get("ok"):
+        provider = result["provider"]
+        storage = result["storage_state"]
+        sid = await db.save_session(provider, storage)
+        response.set_cookie(cookie_name(provider), sid, **COOKIE_KW)
+        return {"ok": True, "provider": provider}
+    # Failure or "needs_step" — pass through to client
+    result.pop("storage_state", None)
+    return JSONResponse(result, status_code=200 if result.get("needs_step") else 400)
 
 
 @app.post("/api/auth/logout")

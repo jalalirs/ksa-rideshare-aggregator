@@ -64,6 +64,14 @@
     <div id="otp-status"></div>
   </div>
 
+  <div class="card hide" id="step-challenge">
+    <h2 id="challenge-title">Additional verification</h2>
+    <div class="small" id="challenge-desc"></div>
+    <input id="challenge-input" type="text" inputmode="numeric" />
+    <button id="challenge-submit">Submit</button>
+    <div id="challenge-status"></div>
+  </div>
+
   <div class="card hide" id="diag-card">
     <h2>What the server saw</h2>
     <div id="shots-strip"></div>
@@ -175,6 +183,83 @@ document.getElementById('send-otp').onclick = async () => {
   }
 };
 
+function showChallenge(challenge) {
+  const card = document.getElementById('step-challenge');
+  const title = document.getElementById('challenge-title');
+  const desc = document.getElementById('challenge-desc');
+  const input = document.getElementById('challenge-input');
+  card.classList.remove('hide');
+  if (challenge.screen_type === 'card_suffix') {
+    title.textContent = `Verify your ${challenge.card_type || 'card'}`;
+    desc.innerHTML =
+      (challenge.first_name ? `Hi <b>${escapeHtml(challenge.first_name)}</b> — ` : '') +
+      `Uber wants the last <b>${challenge.max_length || 8}</b> digits of your ${challenge.card_type || 'card'} ending in <b>${escapeHtml(challenge.last4 || '')}</b>.`;
+    input.maxLength = challenge.max_length || 8;
+    input.placeholder = '8 digits';
+  } else {
+    title.textContent = 'Additional step';
+    desc.textContent = `Uber wants more info: ${challenge.screen_type}. Enter the value below.`;
+  }
+  input.value = '';
+  input.focus();
+}
+
+async function submitAuthAnswer(payload) {
+  const r = await fetch('/api/auth/answer', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  return r.json();
+}
+
+document.getElementById('challenge-submit').onclick = async () => {
+  const value = document.getElementById('challenge-input').value.trim();
+  if (!value) { status('challenge-status', 'err', 'Enter a value first.'); return; }
+  if (!loginId) { status('challenge-status', 'err', 'Restart from step 2.'); return; }
+  const btn = document.getElementById('challenge-submit');
+  btn.disabled = true; btn.textContent = 'Submitting…';
+  status('challenge-status', 'warn', 'Submitting…');
+  try {
+    const j = await submitAuthAnswer({ login_id: loginId, value });
+    handleAuthResult(j, 'challenge-status');
+  } catch (e) {
+    status('challenge-status', 'err', 'Request failed: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Submit';
+  }
+};
+
+function handleAuthResult(j, statusElId) {
+  if (j.ok) {
+    status(statusElId, 'ok', `Signed in to ${j.provider}. Redirecting…`);
+    setTimeout(() => { location.href = '/'; }, 1200);
+    return;
+  }
+  if (j.needs_step && j.challenge) {
+    status(statusElId, 'warn', `Uber needs another step: ${j.challenge.screen_type}`);
+    showChallenge(j.challenge);
+    return;
+  }
+  status(statusElId, 'err', 'Failed: ' + (j.reason || j.detail || JSON.stringify(j)));
+  // Render any diag info on failure
+  const diagCard = document.getElementById('diag-card');
+  if (Array.isArray(j.shots) && j.shots.length) {
+    diagCard.classList.remove('hide');
+    const strip = document.getElementById('shots-strip');
+    strip.innerHTML = j.shots.map(s =>
+      `<div style="margin: 8px 0;"><div class="small"><b>${escapeHtml(s.label)}</b> — ${escapeHtml(s.url)}</div>` +
+      (s.shot ? `<img class="shot" src="data:image/png;base64,${s.shot}" />` : '') +
+      `</div>`
+    ).join('');
+  }
+  if (Array.isArray(j.submit_traffic) && j.submit_traffic.length) {
+    const dbg = document.getElementById('debug');
+    dbg.classList.remove('hide');
+    diagCard.classList.remove('hide');
+    dbg.innerHTML = '<div><b>Network during submit:</b></div><pre style="white-space:pre-wrap;">' + escapeHtml(JSON.stringify(j.submit_traffic, null, 2)) + '</pre>';
+  }
+}
+
 document.getElementById('verify-otp').onclick = async () => {
   const otp = document.getElementById('otp').value.trim();
   if (!otp) { status('otp-status', 'err', 'Enter the OTP first.'); return; }
@@ -189,31 +274,7 @@ document.getElementById('verify-otp').onclick = async () => {
       body: JSON.stringify({ login_id: loginId, otp }),
     });
     const j = await r.json();
-    if (!r.ok || !j.ok) {
-      status('otp-status', 'err', 'Failed: ' + (j.reason || j.detail || JSON.stringify(j)));
-      // Render verify-step screenshots + traffic in the same diag card
-      const diagCard = document.getElementById('diag-card');
-      diagCard.classList.remove('hide');
-      if (Array.isArray(j.shots) && j.shots.length) {
-        const strip = document.getElementById('shots-strip');
-        strip.innerHTML = j.shots.map(s =>
-          `<div style="margin: 8px 0;"><div class="small"><b>${escapeHtml(s.label)}</b> — ${escapeHtml(s.url)}</div>` +
-          (s.shot ? `<img class="shot" src="data:image/png;base64,${s.shot}" />` : '<div class="small">(no screenshot)</div>') +
-          `</div>`
-        ).join('');
-      }
-      const dbg = document.getElementById('debug');
-      dbg.classList.remove('hide');
-      dbg.innerHTML =
-        '<div><b>Selector tried:</b> ' + escapeHtml(j.selector || '(none)') + '</div>' +
-        '<div><b>Input found:</b> <pre style="white-space:pre-wrap;">' + escapeHtml(JSON.stringify(j.input || null, null, 2)) + '</pre></div>' +
-        '<div><b>Typed value:</b> ' + escapeHtml(JSON.stringify(j.typed)) + '</div>' +
-        '<div><b>Click result:</b> <pre style="white-space:pre-wrap;">' + escapeHtml(JSON.stringify(j.click_result || null, null, 2)) + '</pre></div>' +
-        (Array.isArray(j.submit_traffic) && j.submit_traffic.length ? '<div><b>Network during verify:</b></div><pre style="white-space:pre-wrap;">' + escapeHtml(JSON.stringify(j.submit_traffic, null, 2)) + '</pre>' : '<div><b>Network during verify:</b> <i>no requests</i></div>');
-      return;
-    }
-    status('otp-status', 'ok', `Signed in to ${j.provider}. Redirecting…`);
-    setTimeout(() => { location.href = '/'; }, 1200);
+    handleAuthResult(j, 'otp-status');
   } catch (e) {
     status('otp-status', 'err', 'Request failed: ' + e.message);
   } finally {

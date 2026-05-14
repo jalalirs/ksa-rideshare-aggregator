@@ -532,15 +532,79 @@ async def _submit_otp_generic(pl: PendingLogin, otp: str) -> dict:
         "auth.uber.com" not in final_url and "auth.careem.com" not in final_url
         and "/login" not in final_url
     )
-    if not looks_authenticated:
-        return {
-            "ok": False, "reason": "still on auth page", "url": final_url,
-            "selector": sel, "input": sel_info, "typed": typed,
-            "click_result": click_result, "shots": shots, "submit_traffic": submit_traffic,
-        }
+    if looks_authenticated:
+        storage = await pl.context.storage_state()
+        return {"ok": True, "storage_state": storage, "url": final_url, "shots": shots, "submit_traffic": submit_traffic}
 
-    storage = await pl.context.storage_state()
-    return {"ok": True, "storage_state": storage, "url": final_url, "shots": shots, "submit_traffic": submit_traffic}
+    # Still on the auth host — but the OTP may have been accepted and Uber is
+    # asking for an additional verification step (e.g., last digits of a card
+    # on file). Parse the most recent submit-form response to find out.
+    challenge = _parse_next_challenge(submit_traffic)
+    if challenge:
+        return {
+            "ok": False, "needs_step": challenge["screen_type"],
+            "challenge": challenge,
+            "url": final_url, "shots": shots, "submit_traffic": submit_traffic,
+        }
+    return {
+        "ok": False, "reason": "still on auth page", "url": final_url,
+        "selector": sel, "input": sel_info, "typed": typed,
+        "click_result": click_result, "shots": shots, "submit_traffic": submit_traffic,
+    }
+
+
+def _parse_next_challenge(submit_traffic: list[dict]) -> dict | None:
+    """Inspect submit-form responses for a SIGN_IN step-up screen we recognize."""
+    import json as _json
+
+    for entry in reversed(submit_traffic):
+        if "submit-form" not in entry.get("url", ""):
+            continue
+        body = entry.get("resp_body") or ""
+        if not body:
+            continue
+        try:
+            data = _json.loads(body)
+        except Exception:
+            continue
+        # screenErrors mean Uber rejected our answer — surface that
+        if isinstance(data.get("screenErrors"), list) and data["screenErrors"]:
+            err = data["screenErrors"][0]
+            return {
+                "screen_type": "error",
+                "title": err.get("supportForm", {}).get("title", "Error"),
+                "message": err.get("supportForm", {}).get("message", "Unknown error"),
+            }
+        form = data.get("form")
+        if not isinstance(form, dict):
+            continue
+        screens = form.get("screens") or []
+        if not screens:
+            continue
+        screen = screens[0]
+        screen_type = screen.get("screenType", "")
+        if screen_type == "PAYMENT_CARD_NUMBER_SUFFIX":
+            fields = screen.get("fields", [])
+            field = fields[0] if fields else {}
+            cc = field.get("creditCardChallenge", {})
+            hint = (cc.get("creditCardHints") or [{}])[0]
+            profile = field.get("profileHint", {})
+            return {
+                "screen_type": "card_suffix",
+                "card_type": hint.get("displayableCardType") or hint.get("cardType", "card"),
+                "last4": hint.get("cardNumber", ""),
+                "first_name": profile.get("firstName", ""),
+                "prompt_label": "Last 8 digits of card",
+                "max_length": 8,
+                "input_mode": "numeric",
+            }
+        # Unknown screen — surface enough for the UI/diag
+        return {
+            "screen_type": "unknown",
+            "raw_screen_type": screen_type,
+            "raw_screen": screen,
+        }
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -566,6 +630,15 @@ async def start(provider: str, phone: str) -> dict:
 
 
 async def verify(login_id: str, otp: str) -> dict:
+    return await _submit_with_login(login_id, otp, label="verify")
+
+
+async def answer(login_id: str, value: str) -> dict:
+    """Submit a follow-up step's answer (e.g., card-suffix challenge)."""
+    return await _submit_with_login(login_id, value, label="answer")
+
+
+async def _submit_with_login(login_id: str, value: str, label: str) -> dict:
     async with _LOCK:
         pl = PENDING.get(login_id)
     if not pl:
@@ -575,11 +648,15 @@ async def verify(login_id: str, otp: str) -> dict:
         PENDING.pop(login_id, None)
         return {"ok": False, "reason": "login expired — start again"}
     try:
-        result = await VERIFIERS[pl.provider](pl, otp)
+        result = await _submit_otp_generic(pl, value)
     except Exception as e:
-        return {"ok": False, "reason": f"verify failed: {e}"}
+        return {"ok": False, "reason": f"{label} failed: {e}"}
     if result.get("ok"):
         PENDING.pop(login_id, None)
         await _cleanup(pl)
+        result["provider"] = pl.provider
+    elif result.get("needs_step"):
+        # Keep the pending login alive — caller will submit the next step
+        result["login_id"] = login_id
         result["provider"] = pl.provider
     return result
