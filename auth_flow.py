@@ -174,7 +174,13 @@ async def _launch_stealth(pl: PendingLogin) -> None:
     pl.page = await pl.context.new_page()
 
 
-async def _start_uber(pl: PendingLogin, phone: str) -> dict:
+async def _start_uber(pl: PendingLogin, identifier: str) -> dict:
+    """Uber accepts EITHER a phone number or email in the same input.
+
+    Phone path is hard-blocked by SIGNUP_OTP_FRAUD_DENIED from datacenter
+    IPs. Email path goes through email verification which doesn't share the
+    same fraud engine — far more likely to succeed.
+    """
     await _launch_stealth(pl)
     shots: list[dict] = []
 
@@ -182,21 +188,24 @@ async def _start_uber(pl: PendingLogin, phone: str) -> dict:
         shots.append({"label": label, "url": pl.page.url, "shot": await _screenshot_b64(pl.page)})
 
     await pl.page.goto("https://auth.uber.com/v2/", wait_until="domcontentloaded", timeout=45_000)
-    # React hydration on Uber's auth page takes 3-5s
     await pl.page.wait_for_timeout(5000)
     await snap("01_loaded")
 
-    # Normalize to the full international form. Uber's React picker re-selects
-    # the country from the typed prefix, so this works regardless of whatever
-    # default country (US/SA/etc.) the page detected from our locale.
-    digits = "".join(c for c in phone if c.isdigit())
-    if digits.startswith("00966"):
-        digits = digits[2:]   # 00966 → 966
-    elif digits.startswith("0") and not digits.startswith("00"):
-        digits = "966" + digits[1:]
-    elif not digits.startswith("966") and len(digits) <= 10:
-        digits = "966" + digits  # bare local → prefix Saudi
-    international = "+" + digits
+    # If the user provided an email, type as-is. Otherwise normalize to
+    # international phone format.
+    is_email = "@" in identifier
+    if is_email:
+        to_type = identifier.strip()
+    else:
+        digits = "".join(c for c in identifier if c.isdigit())
+        if digits.startswith("00966"):
+            digits = digits[2:]
+        elif digits.startswith("0") and not digits.startswith("00"):
+            digits = "966" + digits[1:]
+        elif not digits.startswith("966") and len(digits) <= 10:
+            digits = "966" + digits
+        to_type = "+" + digits
+    international = to_type
 
     sel = "#PHONE_NUMBER_or_EMAIL_ADDRESS"
     await pl.page.click(sel)

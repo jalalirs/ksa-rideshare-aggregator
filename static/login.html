@@ -48,11 +48,11 @@
   </div>
 
   <div class="card" id="step-phone">
-    <h2>2. Your phone</h2>
-    <label>International format starts with +966 for Saudi Arabia</label>
-    <input id="phone" type="tel" placeholder="+9665XXXXXXXX" />
-    <div class="small">An SMS code will be sent to this number.</div>
-    <button id="send-otp">Send OTP</button>
+    <h2>2. Your phone or email</h2>
+    <label>Phone (+9665XXXXXXXX) — or your Uber/Careem account email</label>
+    <input id="phone" type="text" placeholder="+9665XXXXXXXX  or  you@example.com" />
+    <div class="small">Uber's fraud engine blocks phone OTP from datacenter IPs. <b>Try your email first</b> — it goes through a different verification path and usually works.</div>
+    <button id="send-otp">Send OTP / verification</button>
     <div id="phone-status"></div>
   </div>
 
