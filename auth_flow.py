@@ -400,10 +400,31 @@ async def _submit_otp_generic(pl: PendingLogin, otp: str) -> dict:
 
     await snap("01_otp_loaded")
 
-    # Locate OTP input adaptively.
+    # Locate OTP input(s). Many providers split OTP into one-digit-per-field,
+    # so we have to detect that pattern first.
     sel_info = await page.evaluate("""
         () => {
             const inputs = Array.from(document.querySelectorAll('input')).filter(i => i.offsetParent !== null);
+            // Multi-input OTP: ids like EMAIL_OTP_CODE-0, OTP_CODE-0, code-0, etc.
+            const numbered = inputs.filter(i => {
+                const id = i.id || '';
+                const name = i.name || '';
+                return /(otp|code|verif|pin|one[-_]?time)[-_]\\d+$/i.test(id) ||
+                       /(otp|code|verif|pin|one[-_]?time)[-_]\\d+$/i.test(name);
+            });
+            if (numbered.length > 1) {
+                numbered.sort((a, b) => {
+                    const na = parseInt((a.id || a.name).match(/\\d+$/)[0], 10);
+                    const nb = parseInt((b.id || b.name).match(/\\d+$/)[0], 10);
+                    return na - nb;
+                });
+                return {
+                    multi: true,
+                    selectors: numbered.map(n => n.id ? '#' + n.id : `input[name="${n.name}"]`),
+                    count: numbered.length,
+                };
+            }
+            // Single-input OTP fallback
             let pick = inputs.find(i => (i.autocomplete||'').toLowerCase().includes('one-time'));
             if (!pick) {
                 const re = /(otp|code|verif|pin|one.time)/i;
@@ -414,6 +435,7 @@ async def _submit_otp_generic(pl: PendingLogin, otp: str) -> dict:
             }
             if (!pick) return null;
             return {
+                multi: false,
                 tag: pick.tagName, type: pick.type, id: pick.id, name: pick.name,
                 placeholder: pick.placeholder, ac: pick.autocomplete,
                 aria: pick.getAttribute('aria-label')||'',
@@ -423,23 +445,43 @@ async def _submit_otp_generic(pl: PendingLogin, otp: str) -> dict:
     if not sel_info:
         return {"ok": False, "reason": "no OTP input found", "shots": shots, "submit_traffic": submit_traffic}
 
-    # Build a robust selector — prefer id, then name, then a generic input
-    if sel_info.get("id"):
-        sel = f"#{sel_info['id']}"
-    elif sel_info.get("name"):
-        sel = f'input[name="{sel_info["name"]}"]'
+    typed = ""
+    if sel_info.get("multi"):
+        # Type one character per input, in order
+        digits = [c for c in otp if c.strip()]
+        sels = sel_info["selectors"]
+        try:
+            for i, ch in enumerate(digits):
+                if i >= len(sels):
+                    break
+                s = sels[i]
+                await page.click(s)
+                await page.fill(s, "")
+                await page.type(s, ch, delay=60)
+                await page.wait_for_timeout(80)
+            typed = "".join(digits[: len(sels)])
+        except Exception as e:
+            return {"ok": False, "reason": f"multi-fill failed: {e}", "selectors": sels, "input": sel_info, "shots": shots, "submit_traffic": submit_traffic}
+        sel = sels[-1]  # for any later focus needed
     else:
-        sel = 'input[type="tel"], input[type="number"], input[type="text"]'
+        if sel_info.get("id"):
+            sel = f"#{sel_info['id']}"
+        elif sel_info.get("name"):
+            sel = f'input[name="{sel_info["name"]}"]'
+        else:
+            sel = 'input[type="tel"], input[type="number"], input[type="text"]'
+        try:
+            await page.click(sel)
+            await page.fill(sel, "")
+            await page.type(sel, otp, delay=80)
+        except Exception as e:
+            return {"ok": False, "reason": f"fill failed: {e}", "selector": sel, "input": sel_info, "shots": shots, "submit_traffic": submit_traffic}
+        try:
+            typed = await page.input_value(sel)
+        except Exception:
+            typed = ""
 
-    try:
-        await page.click(sel)
-        await page.fill(sel, "")
-        await page.type(sel, otp, delay=80)
-    except Exception as e:
-        return {"ok": False, "reason": f"fill failed: {e}", "selector": sel, "input": sel_info, "shots": shots, "submit_traffic": submit_traffic}
-
-    await page.wait_for_timeout(800)
-    typed = await page.input_value(sel)
+    await page.wait_for_timeout(1000)
     await snap("02_otp_typed")
 
     # Submit via JS click of the submit button (most React-friendly)
