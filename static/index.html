@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>KSA Rideshare — Compare</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: #f7f7f8; color: #111; min-height: 100vh;
+  }
+  header { padding: 16px 20px; background: #111; color: #fff; }
+  header h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: 0.2px; }
+  header .sub { font-size: 12px; opacity: 0.7; margin-top: 2px; }
+  main { max-width: 720px; margin: 0 auto; padding: 16px; }
+  .card { background: #fff; border-radius: 12px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); margin-bottom: 12px; }
+  .row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
+  .row label { font-size: 12px; color: #555; min-width: 70px; }
+  .row input { flex: 1; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px; font: inherit; }
+  .row button { padding: 10px 14px; border: 0; background: #111; color: #fff; border-radius: 8px; cursor: pointer; font-weight: 600; }
+  .row button:hover { background: #333; }
+  .row button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .small { font-size: 12px; color: #777; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 10px 8px; text-align: left; border-bottom: 1px solid #eee; }
+  th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #888; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eee; font-size: 11px; }
+  .uber .pill { background: #111; color: #fff; }
+  .careem .pill { background: #4caf50; color: #fff; }
+  .status { font-size: 12px; padding: 6px 10px; border-radius: 6px; margin-bottom: 8px; }
+  .status.ok { background: #e6f4ea; color: #137333; }
+  .status.warn { background: #fef7e0; color: #b06000; }
+  .status.err { background: #fce8e6; color: #c5221f; }
+  .empty { color: #999; font-style: italic; }
+  .price { font-weight: 600; }
+  .geo-btn { background: #f0f0f0; color: #111; }
+</style>
+</head>
+<body>
+<header>
+  <h1>KSA Rideshare Aggregator</h1>
+  <div class="sub">Compare Uber + Careem fares from your current location</div>
+</header>
+
+<main>
+  <div class="card">
+    <div id="health" class="status warn">Checking provider status…</div>
+
+    <div class="row">
+      <label>Pickup</label>
+      <input id="pickup" placeholder="lat, lng — e.g. 24.7607, 46.6420" value="24.7607, 46.6420" />
+      <button class="geo-btn" id="use-current" title="Use current location">📍</button>
+    </div>
+    <div class="row">
+      <label>Dropoff</label>
+      <input id="dropoff" placeholder="lat, lng — e.g. 24.7117, 46.6745" value="24.7117, 46.6745" />
+    </div>
+    <div class="row">
+      <label></label>
+      <button id="go">Compare prices</button>
+    </div>
+    <div class="small" id="hint">Tip: paste coords from Google Maps. Full place search comes after we wire the geocoder.</div>
+  </div>
+
+  <div id="results"></div>
+</main>
+
+<script>
+async function checkHealth() {
+  const el = document.getElementById('health');
+  try {
+    const r = await fetch('/api/health');
+    const j = await r.json();
+    const ready = j.providers.filter(p => p.ready).map(p => p.name);
+    const missing = j.providers.filter(p => !p.ready).map(p => p.name);
+    if (missing.length === 0) {
+      el.className = 'status ok'; el.textContent = `All ${ready.length} provider sessions loaded.`;
+    } else if (ready.length === 0) {
+      el.className = 'status err';
+      el.textContent = `No provider sessions loaded — run auth.py for: ${missing.join(', ')}`;
+    } else {
+      el.className = 'status warn';
+      el.textContent = `Ready: ${ready.join(', ')}. Not authed: ${missing.join(', ')}`;
+    }
+  } catch (e) {
+    el.className = 'status err'; el.textContent = 'Health check failed: ' + e.message;
+  }
+}
+
+function parseCoord(s) {
+  const [lat, lng] = s.split(',').map(x => parseFloat(x.trim()));
+  if (isNaN(lat) || isNaN(lng)) return null;
+  return { lat, lng };
+}
+
+document.getElementById('use-current').onclick = () => {
+  if (!navigator.geolocation) { alert('Geolocation not supported'); return; }
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      const { latitude, longitude } = pos.coords;
+      document.getElementById('pickup').value = `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`;
+    },
+    err => alert('Location error: ' + err.message)
+  );
+};
+
+document.getElementById('go').onclick = async () => {
+  const pickup = parseCoord(document.getElementById('pickup').value);
+  const dropoff = parseCoord(document.getElementById('dropoff').value);
+  if (!pickup || !dropoff) { alert('Enter valid coords like 24.7, 46.6'); return; }
+
+  const btn = document.getElementById('go');
+  btn.disabled = true; btn.textContent = 'Fetching…';
+  const out = document.getElementById('results');
+  out.innerHTML = '<div class="card empty">Loading…</div>';
+
+  try {
+    const r = await fetch('/api/quote', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pickup, dropoff }),
+    });
+    const j = await r.json();
+    render(j);
+  } catch (e) {
+    out.innerHTML = `<div class="card status err">Error: ${e.message}</div>`;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Compare prices';
+  }
+};
+
+function render(j) {
+  const out = document.getElementById('results');
+  let html = '';
+  for (const [name, info] of Object.entries(j.providers)) {
+    html += `<div class="card ${name}">`;
+    html += `<h3 style="margin:0 0 8px;"><span class="pill">${name.toUpperCase()}</span></h3>`;
+    if (info.error) {
+      html += `<div class="status err">Error: ${info.error}</div>`;
+    } else if (!info.quotes || info.quotes.length === 0) {
+      html += `<div class="empty">No quotes returned. The session may be stale or the endpoint shape changed.</div>`;
+    } else {
+      html += '<table><thead><tr><th>Product</th><th>Price</th><th>ETA</th></tr></thead><tbody>';
+      for (const q of info.quotes) {
+        html += `<tr><td>${escapeHtml(q.product)}</td><td class="price">${escapeHtml(q.display_price)}</td><td>${escapeHtml(q.display_eta)}</td></tr>`;
+      }
+      html += '</tbody></table>';
+    }
+    html += '</div>';
+  }
+  out.innerHTML = html;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+checkHealth();
+</script>
+</body>
+</html>

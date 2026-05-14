@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.local
+auth_state_*.json
+sessions/
+recon_out/
+discover_out/
+.DS_Store
+.railway/
