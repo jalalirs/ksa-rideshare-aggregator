@@ -159,12 +159,13 @@ async def _launch_stealth(pl: PendingLogin) -> None:
         ],
     )
     pl.context = await pl.browser.new_context(
-        locale="en-US",
+        # en-SA so the provider's country picker defaults to Saudi rather than US
+        locale="en-SA",
         timezone_id="Asia/Riyadh",
         viewport={"width": 1366, "height": 768},
         user_agent=DESKTOP_UA,
         extra_http_headers={
-            "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+            "Accept-Language": "en-SA,en;q=0.9,ar;q=0.8",
             "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
             "Sec-Ch-Ua-Mobile": "?0",
             "Sec-Ch-Ua-Platform": '"macOS"',
@@ -190,19 +191,23 @@ async def _start_uber(pl: PendingLogin, phone: str) -> dict:
     await pl.page.wait_for_timeout(5000)
     await snap("01_loaded")
 
-    # Uber's React-form: page already has Saudi country selected (🇸🇦), so the
-    # input should receive the local mobile number, not the +966 prefix. We
-    # also need to use page.type() with delay rather than fill() so React's
-    # onChange handlers actually fire.
-    local = phone.lstrip("+").lstrip("0")
-    if local.startswith("966"):
-        local = local[3:]  # strip Saudi country code
+    # Normalize to the full international form. Uber's React picker re-selects
+    # the country from the typed prefix, so this works regardless of whatever
+    # default country (US/SA/etc.) the page detected from our locale.
+    digits = "".join(c for c in phone if c.isdigit())
+    if digits.startswith("00966"):
+        digits = digits[2:]   # 00966 → 966
+    elif digits.startswith("0") and not digits.startswith("00"):
+        digits = "966" + digits[1:]
+    elif not digits.startswith("966") and len(digits) <= 10:
+        digits = "966" + digits  # bare local → prefix Saudi
+    international = "+" + digits
 
     sel = "#PHONE_NUMBER_or_EMAIL_ADDRESS"
     await pl.page.click(sel)
     await pl.page.fill(sel, "")  # clear first
-    await pl.page.type(sel, local, delay=80)
-    await pl.page.wait_for_timeout(1200)
+    await pl.page.type(sel, international, delay=80)
+    await pl.page.wait_for_timeout(1500)
     await snap("02_typed")
 
     # Verify the value actually landed in the input
